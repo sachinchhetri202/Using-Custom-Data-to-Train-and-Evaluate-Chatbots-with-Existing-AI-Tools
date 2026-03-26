@@ -1,0 +1,30 @@
+embedding:
+  model_name: sentence-transformers/all-MiniLM-L6-v2
+
+index:
+  chunks_path: data/processed/chunks.jsonl
+  chroma_path: data/chroma_db
+  collection_name: mscs_rag_chunks
+  batch_size: 64
+  rebuild: true
+  filter_navigation_noise: true
+
+retrieval:
+  top_k: 5
+  default_variant: title_filter
+  candidate_k: 20
+  overlap_weight: 0.08
+
+generation:
+  enabled: false
+  model_name: google/flan-t5-small
+  max_new_tokens: 200
+  max_context_chars: 2800
+  per_chunk_char_limit: 900
+  max_input_tokens: 448
+  short_answer_char_threshold: 80
+  prompt_variant: baseline
+  context_policy: baseline
+
+runtime:
+  output_dir: outputs/rag

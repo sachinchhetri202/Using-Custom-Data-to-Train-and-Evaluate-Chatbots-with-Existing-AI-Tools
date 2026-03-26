@@ -1,0 +1,55 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Build/distribution artifacts
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE/editor noise
+.vscode/
+.idea/
+.cursor/
+*.swp
+*.swo
+
+# OS noise
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local logs/runtime files
+*.log
+logs/
+tmp/
+temp/
+
+# Local model/data caches
+.cache/
+hf_home/
+
+# Local vector DB binaries (rebuildable)
+data/chroma_db/
+
+# Project data/artifacts (usually large; generated)
+data/
+outputs/
+!data/.gitkeep
+!outputs/.gitkeep
+
+# Keep research outputs, but ignore transient scratch outputs
+outputs/tmp/

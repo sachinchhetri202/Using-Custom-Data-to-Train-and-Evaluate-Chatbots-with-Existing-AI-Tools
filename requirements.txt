@@ -1,0 +1,6 @@
+python-docx
+pypdf
+chromadb
+sentence-transformers
+pyyaml
+transformers
