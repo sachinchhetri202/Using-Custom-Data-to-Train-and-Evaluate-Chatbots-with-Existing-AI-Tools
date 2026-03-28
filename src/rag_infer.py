@@ -100,6 +100,13 @@ def normalize_answer_text(text: str) -> str:
     return compact_whitespace(cleaned)
 
 
+def short_snippet(text: str, max_chars: int = 320) -> str:
+    normalized = compact_whitespace(text or "")
+    if len(normalized) <= max_chars:
+        return normalized
+    return normalized[:max_chars].rstrip() + " ..."
+
+
 def token_set(text: str) -> set[str]:
     return set(re.findall(r"[a-z0-9]+", text.lower()))
 
@@ -510,6 +517,9 @@ def main() -> None:
             if overlap is not None:
                 weak_overlap_values.append(overlap)
 
+            top_used_chunk = context_pack["used_rows"][0] if context_pack["used_rows"] else None
+            top_used_meta = (top_used_chunk or {}).get("metadata", {}) if top_used_chunk else {}
+
             review_rows.append(
                 {
                     "question_id": row.get("question_id"),
@@ -531,10 +541,16 @@ def main() -> None:
                     "retrieval_variant_info": retrieval_result.get("variant_info", {}),
                     "retrieved_chunks": contexts,
                     "used_context_chunks": context_pack["used_rows"],
+                    "top_evidence_snippet": short_snippet(str((top_used_chunk or {}).get("text", ""))),
+                    "top_evidence_doc_id": top_used_meta.get("doc_id"),
+                    "top_evidence_source_file": top_used_meta.get("source_file"),
                     "weak_reference_overlap": overlap,
                     "input_token_truncated": bool(answer.get("input_token_truncated", False)),
                     "prompt_variant": prompt_variant,
                     "context_policy": context_policy,
+                    "human_judgment_answer_supported": None,
+                    "human_judgment_answer_quality": None,
+                    "human_review_notes": "",
                 }
             )
 
