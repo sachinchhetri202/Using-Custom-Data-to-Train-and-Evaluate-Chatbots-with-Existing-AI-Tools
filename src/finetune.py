@@ -75,12 +75,53 @@ def validate_and_preview(config: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _detect_trl_api() -> Dict[str, Any]:
+    """Inspect installed TRL/transformers to determine which argument names are live."""
+    import inspect
+    import trl
+    import transformers
+    from trl import SFTConfig, SFTTrainer
+
+    cfg_params = set(inspect.signature(SFTConfig).parameters)
+    trainer_params = set(inspect.signature(SFTTrainer.__init__).parameters)
+
+    # Eval-strategy argument name changed in TRL ~0.10 / transformers ~4.46.
+    if "eval_strategy" in cfg_params:
+        eval_strategy_key: Optional[str] = "eval_strategy"
+    elif "evaluation_strategy" in cfg_params:
+        eval_strategy_key = "evaluation_strategy"
+    else:
+        eval_strategy_key = None  # fall back: no per-step eval
+
+    # dataset_text_field moved from SFTTrainer into SFTConfig in TRL ~0.10.
+    text_field_in_config = "dataset_text_field" in cfg_params
+
+    # tokenizer= was replaced by processing_class= in SFTTrainer in TRL ~0.11.
+    # Prefer processing_class when available; fall back to tokenizer.
+    tokenizer_arg = "processing_class" if "processing_class" in trainer_params else "tokenizer"
+
+    api = {
+        "trl_version": trl.__version__,
+        "transformers_version": transformers.__version__,
+        "eval_strategy_arg": eval_strategy_key or "none (disabled)",
+        "dataset_text_field_in": "SFTConfig" if text_field_in_config else "SFTTrainer",
+        "trainer_tokenizer_arg": tokenizer_arg,
+        "text_field_in_config": text_field_in_config,
+        "eval_strategy_key": eval_strategy_key,
+        "tokenizer_arg": tokenizer_arg,
+    }
+    return api
+
+
 def run_training(config: Dict[str, Any]) -> None:
     import torch
     from datasets import load_dataset
     from peft import LoraConfig
     from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
     from trl import SFTConfig, SFTTrainer
+
+    api = _detect_trl_api()
+    print({"trl_api_probe": {k: v for k, v in api.items() if not k.startswith("_")}})
 
     model_name = str(config["model"]["name"])
     train_file = str(config["data"]["train_file"])
@@ -136,35 +177,55 @@ def run_training(config: Dict[str, Any]) -> None:
     )
 
     train_cfg = config["training"]
-    sft_args = SFTConfig(
-        output_dir=output_dir,
-        num_train_epochs=float(train_cfg.get("num_train_epochs", 1)),
-        learning_rate=float(train_cfg.get("learning_rate", 2e-4)),
-        per_device_train_batch_size=int(train_cfg.get("per_device_train_batch_size", 1)),
-        per_device_eval_batch_size=int(train_cfg.get("per_device_eval_batch_size", 1)),
-        gradient_accumulation_steps=int(train_cfg.get("gradient_accumulation_steps", 4)),
-        warmup_ratio=float(train_cfg.get("warmup_ratio", 0.03)),
-        logging_steps=int(train_cfg.get("logging_steps", 10)),
-        save_steps=int(train_cfg.get("save_steps", 100)),
-        eval_steps=int(train_cfg.get("eval_steps", 100)),
-        evaluation_strategy=str(train_cfg.get("evaluation_strategy", "steps")),
-        save_strategy=str(train_cfg.get("save_strategy", "steps")),
-        max_length=int(train_cfg.get("max_length", 1024)),
-        report_to=train_cfg.get("report_to", []),
-        bf16=bool(train_cfg.get("bf16", False)),
-        fp16=bool(train_cfg.get("fp16", True)),
-        gradient_checkpointing=bool(train_cfg.get("gradient_checkpointing", True)),
-    )
 
-    trainer = SFTTrainer(
-        model=model,
-        args=sft_args,
-        train_dataset=train_dataset,
-        eval_dataset=eval_dataset,
-        peft_config=peft_config,
-        tokenizer=tokenizer,
-        dataset_text_field=text_field,
-    )
+    # Build SFTConfig kwargs dynamically to stay compatible across TRL versions.
+    sft_kwargs: Dict[str, Any] = {
+        "output_dir": output_dir,
+        "num_train_epochs": float(train_cfg.get("num_train_epochs", 1)),
+        "learning_rate": float(train_cfg.get("learning_rate", 2e-4)),
+        "per_device_train_batch_size": int(train_cfg.get("per_device_train_batch_size", 1)),
+        "per_device_eval_batch_size": int(train_cfg.get("per_device_eval_batch_size", 1)),
+        "gradient_accumulation_steps": int(train_cfg.get("gradient_accumulation_steps", 4)),
+        "warmup_ratio": float(train_cfg.get("warmup_ratio", 0.03)),
+        "logging_steps": int(train_cfg.get("logging_steps", 10)),
+        "save_steps": int(train_cfg.get("save_steps", 100)),
+        "save_strategy": str(train_cfg.get("save_strategy", "steps")),
+        "max_length": int(train_cfg.get("max_length", 1024)),
+        "report_to": train_cfg.get("report_to", []),
+        "bf16": bool(train_cfg.get("bf16", False)),
+        "fp16": bool(train_cfg.get("fp16", True)),
+        "gradient_checkpointing": bool(train_cfg.get("gradient_checkpointing", True)),
+    }
+
+    # Eval strategy: use whichever argument name this TRL version accepts.
+    # Read from YAML under either key name for backward compat.
+    eval_strategy_key = api["eval_strategy_key"]
+    if eval_strategy_key is not None:
+        eval_strategy_value = str(
+            train_cfg.get("eval_strategy") or train_cfg.get("evaluation_strategy", "steps")
+        )
+        sft_kwargs[eval_strategy_key] = eval_strategy_value
+        sft_kwargs["eval_steps"] = int(train_cfg.get("eval_steps", 100))
+
+    # dataset_text_field: belongs in SFTConfig on newer TRL, SFTTrainer on older TRL.
+    if api["text_field_in_config"]:
+        sft_kwargs["dataset_text_field"] = text_field
+
+    sft_args = SFTConfig(**sft_kwargs)
+
+    # Build SFTTrainer kwargs dynamically.
+    trainer_kwargs: Dict[str, Any] = {
+        "model": model,
+        "args": sft_args,
+        "train_dataset": train_dataset,
+        "eval_dataset": eval_dataset,
+        "peft_config": peft_config,
+        api["tokenizer_arg"]: tokenizer,
+    }
+    if not api["text_field_in_config"]:
+        trainer_kwargs["dataset_text_field"] = text_field
+
+    trainer = SFTTrainer(**trainer_kwargs)
 
     trainer.train()
     trainer.save_model(output_dir)

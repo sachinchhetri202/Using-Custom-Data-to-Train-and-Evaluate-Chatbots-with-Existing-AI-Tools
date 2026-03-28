@@ -25,6 +25,14 @@ def main() -> None:
     args = parse_args()
     config = load_config(Path(args.config))
 
+    adapter_path = Path(args.adapter_dir)
+    if not adapter_path.exists() or not (adapter_path / "adapter_config.json").exists():
+        raise FileNotFoundError(
+            f"Adapter not found at local path: {adapter_path.resolve()}\n"
+            "Expected 'adapter_config.json' inside that directory.\n"
+            "Run training first: python src/finetune.py --config <config.yaml>"
+        )
+
     from peft import PeftModel
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -34,7 +42,7 @@ def main() -> None:
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    model = PeftModel.from_pretrained(base_model, args.adapter_dir)
+    model = PeftModel.from_pretrained(base_model, str(adapter_path))
     model.eval()
 
     formatted = f"Instruction:\n{args.prompt}\n\nResponse:\n"
