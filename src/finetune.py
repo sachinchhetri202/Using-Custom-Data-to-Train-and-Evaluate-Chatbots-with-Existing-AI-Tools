@@ -150,10 +150,42 @@ def run_training(config: Dict[str, Any]) -> None:
             bnb_4bit_compute_dtype=compute_dtype,
         )
 
+    if qlora_enabled:
+        _tc = config["training"]
+        _qc = config.get("quantization", {})
+        _fp16 = bool(_tc.get("fp16", False))
+        _bf16 = bool(_tc.get("bf16", False))
+        _cdt  = str(_qc.get("bnb_4bit_compute_dtype", "float16"))
+        _mdtype = "bfloat16" if _bf16 else "float16"
+        print({
+            "qlora_precision": {
+                "fp16": _fp16,
+                "bf16": _bf16,
+                "bnb_4bit_compute_dtype": _cdt,
+                "grad_scaling_expected": _fp16 and not _bf16,
+                "torch_dtype_for_model": _mdtype,
+                "note": (
+                    "OK — fp16+float16 compute dtype (T4-safe)"
+                    if (_fp16 and not _bf16 and _cdt == "float16")
+                    else "WARN — bf16 mode requires A100+" if _bf16
+                    else "CHECK — non-standard combination"
+                ),
+            }
+        })
+
     model_kwargs: Dict[str, Any] = {}
     if bnb_config is not None:
         model_kwargs["quantization_config"] = bnb_config
         model_kwargs["device_map"] = "auto"
+        # Modern LLMs (including TinyLlama) store torch_dtype: bfloat16 in
+        # their config.json. Without an explicit override, from_pretrained
+        # loads non-quantized layers (embeddings, layer norms, LM head) in
+        # bf16, and PEFT LoRA adapters inherit that dtype. When fp16=True
+        # activates AMP GradScaler, it crashes unscaling bf16 adapter grads:
+        # "not implemented for BFloat16". Forcing torch_dtype to match the
+        # training precision keeps adapter weights and GradScaler aligned.
+        _use_bf16 = bool(config["training"].get("bf16", False))
+        model_kwargs["torch_dtype"] = torch.bfloat16 if _use_bf16 else torch.float16
 
     model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
     tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
