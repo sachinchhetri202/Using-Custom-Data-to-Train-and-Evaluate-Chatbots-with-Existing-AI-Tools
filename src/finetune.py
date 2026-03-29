@@ -157,13 +157,17 @@ def run_training(config: Dict[str, Any]) -> None:
         _bf16 = bool(_tc.get("bf16", False))
         _cdt  = str(_qc.get("bnb_4bit_compute_dtype", "float16"))
         _mdtype = "bfloat16" if _bf16 else "float16"
+        import inspect as _insp_diag
+        _diag_fp_params = set(_insp_diag.signature(AutoModelForCausalLM.from_pretrained).parameters)
+        _diag_dtype_kwarg = "dtype" if "dtype" in _diag_fp_params else "torch_dtype"
         print({
             "qlora_precision": {
                 "fp16": _fp16,
                 "bf16": _bf16,
                 "bnb_4bit_compute_dtype": _cdt,
                 "grad_scaling_expected": _fp16 and not _bf16,
-                "torch_dtype_for_model": _mdtype,
+                "model_dtype_kwarg": _diag_dtype_kwarg,
+                "model_dtype_value": _mdtype,
                 "note": (
                     "OK — fp16+float16 compute dtype (T4-safe)"
                     if (_fp16 and not _bf16 and _cdt == "float16")
@@ -182,10 +186,15 @@ def run_training(config: Dict[str, Any]) -> None:
         # loads non-quantized layers (embeddings, layer norms, LM head) in
         # bf16, and PEFT LoRA adapters inherit that dtype. When fp16=True
         # activates AMP GradScaler, it crashes unscaling bf16 adapter grads:
-        # "not implemented for BFloat16". Forcing torch_dtype to match the
+        # "not implemented for BFloat16". Forcing the dtype to match the
         # training precision keeps adapter weights and GradScaler aligned.
+        # Transformers 5.0 renamed `torch_dtype` → `dtype`; detect at runtime
+        # so the correct kwarg is used regardless of installed version.
+        import inspect as _inspect
+        _fp_params = set(_inspect.signature(AutoModelForCausalLM.from_pretrained).parameters)
+        _dtype_kwarg = "dtype" if "dtype" in _fp_params else "torch_dtype"
         _use_bf16 = bool(config["training"].get("bf16", False))
-        model_kwargs["torch_dtype"] = torch.bfloat16 if _use_bf16 else torch.float16
+        model_kwargs[_dtype_kwarg] = torch.bfloat16 if _use_bf16 else torch.float16
 
     model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
     tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
