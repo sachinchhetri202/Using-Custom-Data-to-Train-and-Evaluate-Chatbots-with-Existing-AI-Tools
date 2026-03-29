@@ -121,7 +121,7 @@ def _detect_trl_api() -> Dict[str, Any]:
 def run_training(config: Dict[str, Any]) -> None:
     import torch
     from datasets import load_dataset
-    from peft import LoraConfig
+    from peft import LoraConfig, cast_mixed_precision_params
     from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
     from trl import SFTConfig, SFTTrainer
 
@@ -188,11 +188,11 @@ def run_training(config: Dict[str, Any]) -> None:
         # activates AMP GradScaler, it crashes unscaling bf16 adapter grads:
         # "not implemented for BFloat16". Forcing the dtype to match the
         # training precision keeps adapter weights and GradScaler aligned.
-        # Transformers 5.0 renamed `torch_dtype` → `dtype`; detect at runtime
-        # so the correct kwarg is used regardless of installed version.
-        import inspect as _inspect
-        _fp_params = set(_inspect.signature(AutoModelForCausalLM.from_pretrained).parameters)
-        _dtype_kwarg = "dtype" if "dtype" in _fp_params else "torch_dtype"
+        # Transformers 5.x deprecates `torch_dtype` in favor of `dtype`.
+        # Prefer `dtype` on 5.x, keep `torch_dtype` for older versions.
+        import transformers as _transformers
+        _tf_major = int(str(_transformers.__version__).split(".", 1)[0])
+        _dtype_kwarg = "dtype" if _tf_major >= 5 else "torch_dtype"
         _use_bf16 = bool(config["training"].get("bf16", False))
         model_kwargs[_dtype_kwarg] = torch.bfloat16 if _use_bf16 else torch.float16
 
@@ -223,6 +223,20 @@ def run_training(config: Dict[str, Any]) -> None:
     )
 
     train_cfg = config["training"]
+    model_context_limit = 2048
+    requested_max_length = int(train_cfg.get("max_length", train_cfg.get("max_seq_length", model_context_limit)))
+    max_seq_length = min(requested_max_length, model_context_limit)
+    if requested_max_length > model_context_limit:
+        print(
+            {
+                "sequence_length": {
+                    "requested_max_length": requested_max_length,
+                    "applied_max_length": max_seq_length,
+                    "model_context_limit": model_context_limit,
+                    "note": "Requested length exceeds model context limit; clamped.",
+                }
+            }
+        )
 
     # Build SFTConfig kwargs dynamically to stay compatible across TRL versions.
     sft_kwargs: Dict[str, Any] = {
@@ -236,7 +250,7 @@ def run_training(config: Dict[str, Any]) -> None:
         "logging_steps": int(train_cfg.get("logging_steps", 10)),
         "save_steps": int(train_cfg.get("save_steps", 100)),
         "save_strategy": str(train_cfg.get("save_strategy", "steps")),
-        "max_length": int(train_cfg.get("max_length", 1024)),
+        "max_length": max_seq_length,
         "report_to": train_cfg.get("report_to", []),
         "bf16": bool(train_cfg.get("bf16", False)),
         "fp16": bool(train_cfg.get("fp16", True)),
@@ -277,6 +291,31 @@ def run_training(config: Dict[str, Any]) -> None:
         trainer_kwargs["dataset_text_field"] = text_field
 
     trainer = SFTTrainer(**trainer_kwargs)
+    run_fp16 = bool(train_cfg.get("fp16", True))
+    run_bf16 = bool(train_cfg.get("bf16", False))
+    if qlora_enabled and run_fp16 and not run_bf16:
+        # Keep trainable adapters in full precision for AMP safety while casting
+        # frozen/base weights to fp16 mixed precision.
+        cast_mixed_precision_params(trainer.model, dtype=torch.float16)
+
+    trainable_dtype_counts: Dict[str, int] = {}
+    for param in trainer.model.parameters():
+        if param.requires_grad:
+            key = str(param.dtype).replace("torch.", "")
+            trainable_dtype_counts[key] = trainable_dtype_counts.get(key, 0) + 1
+
+    print(
+        {
+            "startup_precision_diagnostics": {
+                "fp16": run_fp16,
+                "bf16": run_bf16,
+                "bnb_4bit_compute_dtype": compute_dtype_name if qlora_enabled else None,
+                "trainable_param_dtype_counts": trainable_dtype_counts,
+                "max_seq_length": max_seq_length,
+                "model_context_limit": model_context_limit,
+            }
+        }
+    )
 
     trainer.train()
     trainer.save_model(output_dir)
