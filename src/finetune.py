@@ -100,6 +100,10 @@ def _detect_trl_api() -> Dict[str, Any]:
     # Prefer processing_class when available; fall back to tokenizer.
     tokenizer_arg = "processing_class" if "processing_class" in trainer_params else "tokenizer"
 
+    # gradient_checkpointing_kwargs added to TrainingArguments in transformers ~4.36.
+    # Required for PEFT + gradient checkpointing (QLoRA) to set use_reentrant=False.
+    supports_gc_kwargs = "gradient_checkpointing_kwargs" in cfg_params
+
     api = {
         "trl_version": trl.__version__,
         "transformers_version": transformers.__version__,
@@ -109,6 +113,7 @@ def _detect_trl_api() -> Dict[str, Any]:
         "text_field_in_config": text_field_in_config,
         "eval_strategy_key": eval_strategy_key,
         "tokenizer_arg": tokenizer_arg,
+        "supports_gc_kwargs": supports_gc_kwargs,
     }
     return api
 
@@ -196,6 +201,11 @@ def run_training(config: Dict[str, Any]) -> None:
         "fp16": bool(train_cfg.get("fp16", True)),
         "gradient_checkpointing": bool(train_cfg.get("gradient_checkpointing", True)),
     }
+
+    # PEFT + gradient checkpointing requires use_reentrant=False to avoid
+    # "None of the inputs have requires_grad=True" errors with 4-bit (QLoRA) models.
+    if sft_kwargs["gradient_checkpointing"] and api["supports_gc_kwargs"]:
+        sft_kwargs["gradient_checkpointing_kwargs"] = {"use_reentrant": False}
 
     # Eval strategy: use whichever argument name this TRL version accepts.
     # Read from YAML under either key name for backward compat.
